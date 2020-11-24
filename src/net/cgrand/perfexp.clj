@@ -227,40 +227,62 @@
                 1)
        1)))
 
+(defprotocol RegisterBank
+  (save0 [bank id v])
+  (save1 [bank id v])
+  (fetch [bank coll0 coll]))
+
 (defprotocol ^:private IMatch
   (decode-match [self coll]))
 
-(deftype ^:private Match [^long start, ^:unsynchronized-mutable ^long end]
+(deftype ^:private Match [^long start, ^long end]
   Object
   (toString [_] (prn-str [start end]))
 
   IMatch
   (decode-match [_ coll] (take (- end start) (drop start coll))))
 
-(defn- save0 [matches k start]
-  (assoc matches k (Match. start start)))
+(extend-protocol RegisterBank
+  clojure.lang.APersistentMap
+  (save0 [m id start] (assoc m id (Match. start start)))
+  (save1 [m id end] (update m id (fn [^Match match] (Match. (.-start match) end))))
+  (fetch [m coll0 coll]
+    (-> (reduce-kv (fn [acc k match] (assoc! acc k (decode-match match coll0)))
+                   (transient {:rest coll})
+                   m)
+        persistent!)))
 
-(defn- save1 [matches k end]
-  (update matches k (fn [^Match match] (Match. (.-start match) end))))
+(defrecord ^:private TreeStackFrame [children, ^long start])
 
-(deftype ^:private TreeStackFrame [children start])
+(defrecord ^:private MatchNode [children, ^long start, ^long end]
+  IMatch
+  (decode-match [_ coll] (take (- end start) (drop start coll))))
 
-(deftype ^:private MatchNode [children start end])
-
-(defn- tree-save0 [stack k start]
-  (conj stack (TreeStackFrame. {} start)))
-
-(defn- tree-save1 [stack k end]
-  ;; 'return' `node`:
-  (let [^TreeStackFrame frame* (peek stack)
-        node (MatchNode. (.-children frame*) (.-start frame*) end)
-        stack (pop stack)
-
-        ;; Update 'caller' frame:
-        ^TreeStackFrame frame (peek stack)]
-    (conj (pop stack)
-          (TreeStackFrame. (update (.-children frame) k (fnil conj []) node)
-                           (.-start frame)))))
+(extend-protocol RegisterBank
+  clojure.lang.APersistentVector
+  (save0 [stack _ start] (conj stack (TreeStackFrame. {} start)))
+  (save1 [stack id end]
+    ;; 'return' `node`:
+    (let [^TreeStackFrame callee-frame (peek stack)
+          node (MatchNode. (.-children callee-frame) (.-start callee-frame) end)
+          stack (pop stack)]
+      ;; Update 'caller' state:
+      (update stack (dec (count stack))
+              (fn [^TreeStackFrame caller-frame]
+                (TreeStackFrame. (update (.-children caller-frame) id (fnil conj []) node)
+                                 (.-start caller-frame))))))
+  (fetch [stack coll0 coll]
+    (letfn [(fetch-node [^MatchNode node]
+              (fetch-children {:match (decode-match node coll0)}
+                              (.-children node)))
+            (fetch-children [acc children]
+              (-> (reduce-kv (fn [m id children]
+                               (assoc! m (if (vector? id) (peek id) id) (mapv fetch-node children)))
+                             (transient acc)
+                             children)
+                  persistent!))]
+      (fetch-children {:rest coll}
+                      (.-children ^TreeStackFrame (peek stack))))))
 
 (defprotocol ^:private IVMState
   (thread-count [state])
@@ -279,13 +301,7 @@
 
   (truncate! [_] (set! nthreads 0)))
 
-(defn decode-matches [matches coll0 coll]
-  (-> (reduce-kv (fn [acc k ^Match match] (assoc! acc k (decode-match match coll0)))
-                 (transient {:rest coll})
-                 matches)
-      persistent!))
-
-(defn exec-automaton [^CompiledPattern automaton coll0]
+(defn- exec-automaton* [^CompiledPattern automaton coll0 registers]
   (let [^bytes opcodes (.-opcodes automaton)
         ^"[Ljava.lang.Object;" args (.-args automaton)
         inst-count (alength opcodes)
@@ -335,7 +351,7 @@
                                (recur (inc i)))
                              matches)))))]
 
-    (add-thread! 0 state 0 {})
+    (add-thread! 0 state 0 registers)
     (loop [pos 0, coll (seq coll0), state state, state* state*, longest nil]
       (let [longest (or (match-item pos coll state state*) longest)]
         (if (and (> (thread-count state*) 0) coll)
@@ -343,7 +359,13 @@
             (truncate! state)
             (recur (inc pos) (next coll) state* state longest))
           (when longest
-            (decode-matches longest coll0 (or coll ()))))))))
+            (fetch longest coll0 (or coll ()))))))))
 
-(defn exec [re coll]
-  (exec-automaton (compile re) coll))
+(defn exec-automaton [automaton coll] (exec-automaton* automaton coll {}))
+
+(defn exec [re coll] (exec-automaton (compile re) coll))
+
+(defn exec-tree-automaton [automaton coll]
+  (exec-automaton* automaton coll [(TreeStackFrame. {} 0)]))
+
+(defn exec-tree [re coll] (exec-tree-automaton (compile re) coll))
