@@ -93,3 +93,16 @@
     (se/cat (se/*? se/_) (se/?= odd?) (se/as :a (se/* se/_))) [2 4 5 6 8] [5 6 8]
     (se/cat (se/*? se/_) (se/?= odd? odd?) (se/as :a (se/* se/_))) [2 4 5 6 7 9 8 11] [7 9 8 11]
     (se/cat (se/as :a (se/*? se/_)) (se/?= odd?)) [2 4 5 6 8] [2 4]))
+
+(deftest tree
+  (is (= (se/exec-tree
+           (se/*
+             (se/as [:sections]
+                    (se/cat :h1
+                            (se/as [:sections :ps] (se/+ :p)))))
+           [:h1 :p :h1 :p :p :p])
+
+         {:match [{:match [:h1 :p :h1 :p :p :p],
+                   :sections [{:match [:h1 :p], :ps [{:match [:p]}]}
+                              {:match [:h1 :p :p :p], :ps [{:match [:p :p :p]}]}]}]
+          :rest []})))

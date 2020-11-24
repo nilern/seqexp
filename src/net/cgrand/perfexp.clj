@@ -243,6 +243,25 @@
 (defn- save1 [matches k end]
   (update matches k (fn [^Match match] (Match. (.-start match) end))))
 
+(deftype ^:private TreeStackFrame [children start])
+
+(deftype ^:private MatchNode [children start end])
+
+(defn- tree-save0 [stack k start]
+  (conj stack (TreeStackFrame. {} start)))
+
+(defn- tree-save1 [stack k end]
+  ;; 'return' `node`:
+  (let [^TreeStackFrame frame* (peek stack)
+        node (MatchNode. (.-children frame*) (.-start frame*) end)
+        stack (pop stack)
+
+        ;; Update 'caller' frame:
+        ^TreeStackFrame frame (peek stack)]
+    (conj (pop stack)
+          (TreeStackFrame. (update (.-children frame) k (fnil conj []) node)
+                           (.-start frame)))))
+
 (defprotocol ^:private IVMState
   (thread-count [state])
   (fork! [state pc matches])
